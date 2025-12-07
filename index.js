@@ -25,7 +25,7 @@ app.post('/translate', async (req, res) => {
     console.log('Received word from frontend:', germanWord);
 
     // 2. Build prompts and payload (similar to frontend)
-    const systemPrompt = `You are a specialized German-English vocabulary expert. Your task is to provide the exact English translation and the German article/gender for a given German word. If the word is a noun, you MUST include the article (der, die, or das) and the plural form in parentheses. If it is a verb, include the infinitive form and, if possible, the past participle (e.g., gehen (ging, gegangen)). Provide the response as a clean JSON object following the schema.`;
+    const systemPrompt = `You are a specialized German-English vocabulary expert. Your task is to provide the exact English translation, German article/gender, and example usage for a given German word. If the word is a noun, you MUST include the article (der, die, or das) and the plural form in parentheses. If it is a verb, include the infinitive form and, if possible, the past participle (e.g., gehen (ging, gegangen)). Also provide 2-3 simple example sentences showing how the word is used in context, with English translations. Provide the response as a clean JSON object following the schema.`;
 
     const userQuery = `German word: ${germanWord}`;
 
@@ -34,9 +34,21 @@ app.post('/translate', async (req, res) => {
       properties: {
         germanWord: { type: "STRING", description: "The exact German word entered, including article if applicable." },
         englishTranslation: { type: "STRING", description: "The primary, most accurate English translation." },
-        details: { type: "STRING", description: "German grammar details (e.g., gender, plural, verb forms). Include the plural form in parentheses for nouns." }
+        details: { type: "STRING", description: "German grammar details (e.g., gender, plural, verb forms). Include the plural form in parentheses for nouns." },
+        examples: { 
+          type: "ARRAY", 
+          description: "2-3 example sentences showing the word in context",
+          items: {
+            type: "OBJECT",
+            properties: {
+              german: { type: "STRING", description: "Example sentence in German" },
+              english: { type: "STRING", description: "English translation of the example" }
+            },
+            required: ["german", "english"]
+          }
+        }
       },
-      required: ["germanWord", "englishTranslation", "details"]
+      required: ["germanWord", "englishTranslation", "details", "examples"]
     };
 
     const payload = {
@@ -108,6 +120,7 @@ app.post('/translate', async (req, res) => {
     return res.json({
       german: fullGerman,
       english: fullEnglish,
+      examples: parsedData.examples || [],
       raw: parsedData,  // Optional extra info
     });
 
