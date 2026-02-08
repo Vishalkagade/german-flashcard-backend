@@ -54,16 +54,27 @@ app.post('/translate', translateLimiter, async (req, res) => {
     console.log('Received word from frontend:', germanWord);
 
     // 2. Build prompts and payload (similar to frontend)
-    const systemPrompt = `You are a specialized German-English vocabulary expert. Your task is to provide the exact English translation, German article/gender, and example usage for a given German word. If the word is a noun, you MUST include the article (der, die, or das) and the plural form in parentheses. If it is a verb, include the infinitive form and, if possible, the past participle (e.g., gehen (ging, gegangen)). Also provide 2-3 simple example sentences showing how the word is used in context, with English translations. Provide the response as a clean JSON object following the schema.`;
+    const systemPrompt = `You are a specialized German-English vocabulary expert. Your task is to provide clear, concise vocabulary information optimized for flashcard learning.
+
+FORMATTING RULES:
+- For NOUNS: Include article in germanWord, add plural in details. Example: germanWord: "das Haus", details: "Noun • neuter • plural: Häuser"
+- For VERBS: If reflexive, INCLUDE "sich" in germanWord. Example: germanWord: "sich vorstellen", details: "Reflexive verb • past: stellte vor"
+- For REGULAR VERBS: Example: germanWord: "gehen", details: "Verb • past: ging, gegangen"
+- For ADJECTIVES: Just say "Adjective" with any relevant info
+- Keep details SHORT and SCANNABLE (under 60 characters)
+- Use bullet points (•) to separate information
+- Provide 2-3 simple, practical example sentences
+
+Provide the response as a clean JSON object following the schema.`;
 
     const userQuery = `German word: ${germanWord}`;
 
     const responseSchema = {
       type: "OBJECT",
       properties: {
-        germanWord: { type: "STRING", description: "The exact German word entered, including article if applicable." },
+        germanWord: { type: "STRING", description: "The exact German word with article (for nouns) or 'sich' (for reflexive verbs). Examples: 'das Haus', 'sich vorstellen', 'gehen'" },
         englishTranslation: { type: "STRING", description: "The primary, most accurate English translation." },
-        details: { type: "STRING", description: "German grammar details (e.g., gender, plural, verb forms). Include the plural form in parentheses for nouns." },
+        details: { type: "STRING", description: "Concise grammar details using bullet format (•). Examples: 'Noun • neuter • plural: Häuser', 'Reflexive verb • past: stellte vor', or 'Verb • past: ging, gegangen'. Keep under 60 characters." },
         examples: { 
           type: "ARRAY", 
           description: "2-3 example sentences showing the word in context",
