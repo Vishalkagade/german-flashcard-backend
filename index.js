@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');    // IMPORTANT: node-fetch v2
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,8 +13,36 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());            // Allow requests from any origin (for dev)
 app.use(express.json());    // Parse JSON request bodies
 
+// ---------- RATE LIMITING ----------
+// Date-based key ensures reset at midnight
+const getDailyKey = (ip) => {
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  return `${ip}-${today}`;
+};
+
+const translateLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,  // 24 hours (for store cleanup)
+  max: 40,                         // 40 requests per day
+  standardHeaders: true,
+  legacyHeaders: false,
+
+  // IP + date as key = auto resets at midnight
+  keyGenerator: (req) => {
+    const ip = req.ip || req.connection.remoteAddress || 'unknown';
+    return getDailyKey(ip);
+  },
+
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: 'Daily limit reached',
+      message: 'You\'ve used all 40 free translations for today. Resets at midnight.',
+      limit: 40
+    });
+  }
+});
+
 // ---------- ROUTE: /translate ----------
-app.post('/translate', async (req, res) => {
+app.post('/translate', translateLimiter, async (req, res) => {
   try {
     // 1. Read the word from the request body
     const { germanWord } = req.body;
