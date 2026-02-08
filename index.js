@@ -56,13 +56,16 @@ app.post('/translate', translateLimiter, async (req, res) => {
     // 2. Build prompts and payload (similar to frontend)
     const systemPrompt = `You are a specialized German-English vocabulary expert. Your task is to provide clear, concise vocabulary information optimized for flashcard learning.
 
+CRITICAL RULE: The "details" field must ONLY contain GERMAN grammar information. NEVER include English translations or meanings in the details field.
+
 FORMATTING RULES:
-- For NOUNS: Include article in germanWord, add plural in details. Example: germanWord: "das Haus", details: "Noun • neuter • plural: Häuser"
-- For VERBS: If reflexive, INCLUDE "sich" in germanWord. Example: germanWord: "sich vorstellen", details: "Reflexive verb • past: stellte vor"
-- For REGULAR VERBS: Example: germanWord: "gehen", details: "Verb • past: ging, gegangen"
-- For ADJECTIVES: Just say "Adjective" with any relevant info
+- For NOUNS: Include article in germanWord, add GERMAN plural in details. Example: germanWord: "das Haus", details: "Noun • neuter • plural: Häuser" (NOT "houses"!)
+- For VERBS: If reflexive, INCLUDE "sich" in germanWord. Example: germanWord: "sich duschen", details: "Reflexive verb • infinitive" (NO English!)
+- For REGULAR VERBS: Example: germanWord: "gehen", details: "Verb • past: ging, gegangen" (ONLY German forms!)
+- For ADJECTIVES: Example: germanWord: "schön", details: "Adjective • comparative: schöner" (NO English!)
 - Keep details SHORT and SCANNABLE (under 60 characters)
 - Use bullet points (•) to separate information
+- Details = German grammar ONLY (gender, plural, verb forms, cases)
 - Provide 2-3 simple, practical example sentences
 
 Provide the response as a clean JSON object following the schema.`;
@@ -74,7 +77,7 @@ Provide the response as a clean JSON object following the schema.`;
       properties: {
         germanWord: { type: "STRING", description: "The exact German word with article (for nouns) or 'sich' (for reflexive verbs). Examples: 'das Haus', 'sich vorstellen', 'gehen'" },
         englishTranslation: { type: "STRING", description: "The primary, most accurate English translation." },
-        details: { type: "STRING", description: "Concise grammar details using bullet format (•). Examples: 'Noun • neuter • plural: Häuser', 'Reflexive verb • past: stellte vor', or 'Verb • past: ging, gegangen'. Keep under 60 characters." },
+        details: { type: "STRING", description: "GERMAN grammar details ONLY using bullet format (•). NEVER include English translations here! Examples: 'Noun • neuter • plural: Häuser' (NOT 'houses'), 'Reflexive verb • infinitive', or 'Verb • past: ging, gegangen'. Keep under 60 characters. ONLY German grammar info!" },
         examples: { 
           type: "ARRAY", 
           description: "2-3 example sentences showing the word in context",
