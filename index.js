@@ -112,7 +112,7 @@ Provide the response as a clean JSON object following the schema.`;
       return res.status(500).json({ error: 'Server misconfiguration: API key missing' });
     }
 
-    const modelName = 'gemini-2.5-flash-preview-09-2025';
+    const modelName = 'gemini-1.5-flash';
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
     console.log('Calling Gemini API...');
