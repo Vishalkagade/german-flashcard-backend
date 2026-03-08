@@ -108,7 +108,7 @@ app.post('/translate', translateLimiter, async (req, res) => {
 
 CRITICAL RULE: The "details" field must ONLY contain GERMAN grammar information. NEVER include English translations or meanings in the details field.
 
-FORMATTING RULES:
+GRAMMAR FORMATTING RULES:
 - For NOUNS: Include article in germanWord, add GERMAN plural in details. Example: germanWord: "das Haus", details: "Noun • neuter • plural: Häuser" (NOT "houses"!)
 - For VERBS: If reflexive, INCLUDE "sich" in germanWord. Example: germanWord: "sich duschen", details: "Reflexive verb • infinitive" (NO English!)
 - For REGULAR VERBS: Example: germanWord: "gehen", details: "Verb • past: ging, gegangen" (ONLY German forms!)
@@ -116,7 +116,22 @@ FORMATTING RULES:
 - Keep details SHORT and SCANNABLE (under 60 characters)
 - Use bullet points (•) to separate information
 - Details = German grammar ONLY (gender, plural, verb forms, cases)
-- Provide 2-3 simple, practical example sentences
+
+TRANSLATION RULES:
+- Give the primary everyday meaning first
+- If the word has other common meanings, add them after a semicolon: "to meet; also: to hit, to make (a decision)"
+- Only include meanings that Germans actually use often — skip rare/archaic ones
+- Keep it concise: max 2-3 meanings total
+
+EXAMPLE SENTENCE RULES:
+- Provide 2-3 examples, each MUST show a DIFFERENT meaning or common collocation
+- Use natural, conversational German — how real people actually talk, NOT textbook sentences
+- Show real-life situations: chatting with friends, ordering food, texting, work conversations, daily routines
+- Include common collocations and phrases Germans actually say (e.g. "eine Entscheidung treffen", "Bescheid geben", "Lust haben")
+- If the word has multiple meanings, each example MUST demonstrate a different usage
+- BAD example: "Ich treffe meinen Freund." (too simple, textbook-like)
+- GOOD example: "Lass uns morgen im Cafe treffen!" (natural, how people actually speak)
+- GOOD example: "Er hat eine schwierige Entscheidung getroffen." (shows a different meaning/collocation)
 
 Provide the response as a clean JSON object following the schema.`;
 
@@ -128,11 +143,11 @@ Provide the response as a clean JSON object following the schema.`;
       type: "OBJECT",
       properties: {
         germanWord: { type: "STRING", description: "The exact German word with article (for nouns) or 'sich' (for reflexive verbs). Examples: 'das Haus', 'sich vorstellen', 'gehen'" },
-        englishTranslation: { type: "STRING", description: "The primary, most accurate English translation." },
+        englishTranslation: { type: "STRING", description: "Primary meaning first, then other common meanings after semicolon. Example: 'to meet; also: to hit, to make (a decision)'. Max 2-3 meanings, only frequently used ones." },
         details: { type: "STRING", description: "GERMAN grammar details ONLY using bullet format (•). NEVER include English translations here! Examples: 'Noun • neuter • plural: Häuser' (NOT 'houses'), 'Reflexive verb • infinitive', or 'Verb • past: ging, gegangen'. Keep under 60 characters. ONLY German grammar info!" },
         examples: {
           type: "ARRAY",
-          description: "2-3 example sentences showing the word in context",
+          description: "2-3 example sentences, each showing a DIFFERENT meaning or collocation. Use natural conversational German, not textbook style.",
           items: {
             type: "OBJECT",
             properties: {
@@ -270,9 +285,9 @@ app.post('/translate-batch', async (req, res) => {
 
 For EACH word, provide:
 - germanWord: Include article (der/die/das) for nouns, "sich" for reflexive verbs
-- englishTranslation: Primary English meaning
+- englishTranslation: Primary meaning first; if other common meanings exist, add after semicolon (e.g. "to meet; also: to hit, to make (a decision)"). Max 2-3 meanings, only frequently used ones.
 - details: GERMAN grammar info ONLY (gender, plural, verb forms). Use bullet (•) separators. Under 60 chars. NO English in details!
-- examples: 2 example sentences (german + english)
+- examples: 2 example sentences (german + english). Each example MUST show a DIFFERENT meaning or common collocation. Use natural conversational German, not textbook style. Show real-life situations.
 
 Return a JSON array with one object per word.`;
 
