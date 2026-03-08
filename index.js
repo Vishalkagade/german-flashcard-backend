@@ -1,37 +1,71 @@
-// Load environment variables from .env
+/**
+ * index.js - Backend server for the Cardio flashcard app
+ *
+ * This is a simple Express.js server with ONE job:
+ * - Receive a German word from the frontend
+ * - Call the Google Gemini API to get translation + grammar + examples
+ * - Return the structured result to the frontend
+ *
+ * The backend exists because the Gemini API key must stay secret.
+ * If we called the API directly from the browser, anyone could steal the key.
+ *
+ * Endpoints:
+ *   POST /translate  — translates a German word (rate limited: 40/day per IP)
+ *
+ * Environment variables (in .env file):
+ *   GEMINI_API_KEY   — your Google Gemini API key
+ *   PORT             — server port (defaults to 3000)
+ */
+
+// Load environment variables from .env file into process.env
 require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch');    // IMPORTANT: node-fetch v2
+const fetch = require('node-fetch');    // node-fetch v2 (v3 doesn't support require())
 const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- MIDDLEWARE ----------
-app.use(cors());            // Allow requests from any origin (for dev)
-app.use(express.json());    // Parse JSON request bodies
 
-// ---------- RATE LIMITING ----------
-// Date-based key ensures reset at midnight
+// ==========================================================================
+// MIDDLEWARE
+// ==========================================================================
+
+// CORS: Allow requests from any origin (the frontend runs on a different URL)
+// In production, you could restrict this to your GitHub Pages domain for security.
+app.use(cors());
+
+// Parse JSON request bodies (the frontend sends { germanWord: "..." })
+app.use(express.json());
+
+
+// ==========================================================================
+// RATE LIMITING
+// ==========================================================================
+// Prevents abuse by limiting each IP to 40 translations per day.
+// Uses IP + today's date as the key, so the counter resets at midnight.
+
+// Generate a unique key per IP per day (e.g., "192.168.1.1-2026-02-21")
 const getDailyKey = (ip) => {
-  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  const today = new Date().toISOString().split('T')[0]; // "YYYY-MM-DD"
   return `${ip}-${today}`;
 };
 
 const translateLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000,  // 24 hours (for store cleanup)
-  max: 40,                         // 40 requests per day
-  standardHeaders: true,
+  windowMs: 24 * 60 * 60 * 1000,  // 24 hours (controls how long the store keeps entries)
+  max: 40,                         // Maximum 40 requests per key
+  standardHeaders: true,           // Send RateLimit-* headers in responses
   legacyHeaders: false,
 
-  // IP + date as key = auto resets at midnight
+  // Custom key: IP + date means a new day = a fresh quota
   keyGenerator: (req) => {
     const ip = req.ip || req.connection.remoteAddress || 'unknown';
     return getDailyKey(ip);
   },
 
+  // Custom response when limit is hit (frontend checks for 429 status)
   handler: (_req, res) => {
     res.status(429).json({
       error: 'Daily limit reached',
@@ -41,10 +75,19 @@ const translateLimiter = rateLimit({
   }
 });
 
-// ---------- ROUTE: /translate ----------
+
+// ==========================================================================
+// ROUTE: POST /translate
+// ==========================================================================
+// This is the main (and only) endpoint. Flow:
+// 1. Frontend sends: { germanWord: "Haus" }
+// 2. We build a prompt for the Gemini API
+// 3. Gemini returns structured JSON with translation + grammar + examples
+// 4. We format and send it back to the frontend
+
 app.post('/translate', translateLimiter, async (req, res) => {
   try {
-    // 1. Read the word from the request body
+    // --- Step 1: Validate input ---
     const { germanWord } = req.body;
 
     if (!germanWord || !germanWord.trim()) {
@@ -53,7 +96,14 @@ app.post('/translate', translateLimiter, async (req, res) => {
 
     console.log('Received word from frontend:', germanWord);
 
-    // 2. Build prompts and payload (similar to frontend)
+    // --- Step 2: Build the Gemini API request ---
+
+    // System prompt: tells Gemini how to format its response.
+    // Key rules:
+    // - Include the article (der/die/das) for nouns
+    // - Include "sich" for reflexive verbs
+    // - Grammar details must be in GERMAN only (no English in the details field)
+    // - Provide 2-3 example sentences
     const systemPrompt = `You are a specialized German-English vocabulary expert. Your task is to provide clear, concise vocabulary information optimized for flashcard learning.
 
 CRITICAL RULE: The "details" field must ONLY contain GERMAN grammar information. NEVER include English translations or meanings in the details field.
@@ -72,14 +122,16 @@ Provide the response as a clean JSON object following the schema.`;
 
     const userQuery = `German word: ${germanWord}`;
 
+    // Response schema: tells Gemini the exact JSON structure we expect.
+    // This uses Gemini's "structured output" feature to guarantee valid JSON.
     const responseSchema = {
       type: "OBJECT",
       properties: {
         germanWord: { type: "STRING", description: "The exact German word with article (for nouns) or 'sich' (for reflexive verbs). Examples: 'das Haus', 'sich vorstellen', 'gehen'" },
         englishTranslation: { type: "STRING", description: "The primary, most accurate English translation." },
         details: { type: "STRING", description: "GERMAN grammar details ONLY using bullet format (•). NEVER include English translations here! Examples: 'Noun • neuter • plural: Häuser' (NOT 'houses'), 'Reflexive verb • infinitive', or 'Verb • past: ging, gegangen'. Keep under 60 characters. ONLY German grammar info!" },
-        examples: { 
-          type: "ARRAY", 
+        examples: {
+          type: "ARRAY",
           description: "2-3 example sentences showing the word in context",
           items: {
             type: "OBJECT",
@@ -94,18 +146,19 @@ Provide the response as a clean JSON object following the schema.`;
       required: ["germanWord", "englishTranslation", "details", "examples"]
     };
 
+    // The full request payload for Gemini's generateContent API
     const payload = {
       contents: [{ parts: [{ text: userQuery }] }],
       systemInstruction: {
         parts: [{ text: systemPrompt }]
       },
       generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
+        responseMimeType: "application/json",  // Force JSON output
+        responseSchema: responseSchema,         // Enforce our schema
       },
     };
 
-    // 3. Call the Gemini API
+    // --- Step 3: Call the Gemini API ---
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       console.error('GEMINI_API_KEY is missing in .env');
@@ -123,6 +176,7 @@ Provide the response as a clean JSON object following the schema.`;
       body: JSON.stringify(payload),
     });
 
+    // Handle Gemini API errors
     if (!apiResponse.ok) {
       const errorText = await apiResponse.text();
       console.error('Gemini API error:', apiResponse.status, errorText);
@@ -133,16 +187,17 @@ Provide the response as a clean JSON object following the schema.`;
       });
     }
 
+    // --- Step 4: Parse the Gemini response ---
     const result = await apiResponse.json();
-    // console.log('Gemini raw result:', JSON.stringify(result, null, 2));
 
-    // 4. Extract and parse model output
+    // Gemini returns: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
     const candidate = result.candidates?.[0];
     if (!candidate || !candidate.content?.parts?.[0]?.text) {
       console.error('Invalid Gemini response structure:', result);
       return res.status(500).json({ error: 'Invalid response from Gemini API' });
     }
 
+    // The text is a JSON string (because we requested responseMimeType: "application/json")
     const jsonText = candidate.content.parts[0].text;
 
     let parsedData;
@@ -156,15 +211,20 @@ Provide the response as a clean JSON object following the schema.`;
       });
     }
 
-    // 5. Build response for frontend
+    // --- Step 5: Format and send response to frontend ---
+    // The frontend expects german text in this format:
+    //   "das Haus\n\n(Noun • neuter • plural: Häuser)"
+    // Line 1: the word with article
+    // Line 2: blank
+    // Line 3: grammar details in parentheses
     const fullGerman = `${parsedData.germanWord}\n\n(${parsedData.details})`;
     const fullEnglish = parsedData.englishTranslation;
 
     return res.json({
-      german: fullGerman,
-      english: fullEnglish,
-      examples: parsedData.examples || [],
-      raw: parsedData,  // Optional extra info
+      german: fullGerman,        // Formatted German text for the flashcard front
+      english: fullEnglish,      // English translation for the flashcard back
+      examples: parsedData.examples || [],  // Example sentences
+      raw: parsedData,           // Full Gemini response (useful for debugging)
     });
 
   } catch (error) {
@@ -173,7 +233,132 @@ Provide the response as a clean JSON object following the schema.`;
   }
 });
 
-// ---------- START SERVER ----------
+
+// ==========================================================================
+// ROUTE: POST /translate-batch
+// ==========================================================================
+// Translates multiple German words in a single Gemini API call.
+// Used by the daily auto-add feature (no rate limiting).
+// Input: { words: ["Apfel", "sprechen", ...] } (max 10)
+// Output: [{ german, english, examples }, ...]
+
+app.post('/translate-batch', async (req, res) => {
+  try {
+    const { words } = req.body;
+
+    if (!words || !Array.isArray(words) || words.length === 0) {
+      return res.status(400).json({ error: 'words array is required' });
+    }
+
+    // Validate and sanitize: only strings, max 100 chars each, limit to 10
+    const batch = words
+      .filter(w => typeof w === 'string' && w.trim().length > 0 && w.length <= 100)
+      .slice(0, 10);
+
+    if (batch.length === 0) {
+      return res.status(400).json({ error: 'No valid words provided' });
+    }
+
+    console.log('Batch translate:', batch.length, 'words');
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Server misconfiguration: API key missing' });
+    }
+
+    const systemPrompt = `You are a specialized German-English vocabulary expert. Translate the given list of German words for flashcard learning.
+
+For EACH word, provide:
+- germanWord: Include article (der/die/das) for nouns, "sich" for reflexive verbs
+- englishTranslation: Primary English meaning
+- details: GERMAN grammar info ONLY (gender, plural, verb forms). Use bullet (•) separators. Under 60 chars. NO English in details!
+- examples: 2 example sentences (german + english)
+
+Return a JSON array with one object per word.`;
+
+    const userQuery = `Translate these German words: ${JSON.stringify(batch)}`;
+
+    const responseSchema = {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          germanWord: { type: "STRING" },
+          englishTranslation: { type: "STRING" },
+          details: { type: "STRING" },
+          examples: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                german: { type: "STRING" },
+                english: { type: "STRING" }
+              },
+              required: ["german", "english"]
+            }
+          }
+        },
+        required: ["germanWord", "englishTranslation", "details", "examples"]
+      }
+    };
+
+    const payload = {
+      contents: [{ parts: [{ text: userQuery }] }],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: responseSchema,
+      },
+    };
+
+    const modelName = 'gemini-2.5-flash-lite';
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+    const apiResponse = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!apiResponse.ok) {
+      const errorText = await apiResponse.text();
+      console.error('Gemini API error:', apiResponse.status, errorText);
+      return res.status(apiResponse.status).json({ error: 'Gemini API call failed' });
+    }
+
+    const result = await apiResponse.json();
+    const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!jsonText) {
+      return res.status(500).json({ error: 'Invalid response from Gemini API' });
+    }
+
+    let parsedArray;
+    try {
+      parsedArray = JSON.parse(jsonText);
+    } catch (e) {
+      return res.status(500).json({ error: 'Failed to parse Gemini response' });
+    }
+
+    // Format each word the same way as /translate
+    const formatted = parsedArray.map(item => ({
+      german: `${item.germanWord}\n\n(${item.details})`,
+      english: item.englishTranslation,
+      examples: item.examples || [],
+    }));
+
+    return res.json(formatted);
+
+  } catch (error) {
+    console.error('Batch translate error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+// ==========================================================================
+// START SERVER
+// ==========================================================================
 app.listen(PORT, () => {
   console.log(`Backend server running on http://localhost:${PORT}`);
 });
