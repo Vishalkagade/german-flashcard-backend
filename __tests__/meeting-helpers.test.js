@@ -434,8 +434,8 @@ describe('extractVocabulary', () => {
 
     const [, options] = fetch.mock.calls[0];
     const body = JSON.parse(options.body);
-    const userQuery = body.contents[0].parts[0].text;
-    expect(userQuery).toContain('A2');
+    const systemPrompt = body.systemInstruction.parts[0].text;
+    expect(systemPrompt).toContain('A2');
   });
 
   test('defaults to b1 level description when userLevel is unknown', async () => {

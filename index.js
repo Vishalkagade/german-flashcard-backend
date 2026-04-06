@@ -526,17 +526,18 @@ async function extractVocabulary(transcript, userLevel, existingWords) {
 
   const systemPrompt = `You are a German language teacher helping a ${levelDescriptions[userLevel] || levelDescriptions.b1} student extract useful vocabulary from a meeting transcript.
 
-TASK: Identify 15-20 German words/phrases from the transcript that would be most valuable for this student to learn.
+TASK: Extract German words that ACTUALLY APPEAR in the transcript and would be valuable for this student to learn.
 
-RULES:
-1. SKIP words the student already knows (provided in the existing deck list below)
-2. SKIP very common words that any ${(userLevel || 'b1').toUpperCase()} student would already know (der, die, das, ist, hat, und, aber, nicht, auch, ich, du, er, sie, es, wir, ihr, ein, eine, mit, von, zu, in, auf, an, etc.)
-3. SKIP English words, proper nouns, filler words
-4. FOCUS on vocabulary that appeared in a meaningful context in the meeting
-5. For nouns: ALWAYS include the article (der/die/das)
-6. For reflexive verbs: include "sich"
-7. Rank words by usefulness for daily life (most useful first)
-8. Provide 2 natural example sentences per word, each showing a different usage
+CRITICAL RULES:
+1. ONLY return words that are LITERALLY PRESENT in the transcript text. Do NOT invent, suggest, or generate words that do not appear in the transcript. Every word you return MUST be findable in the transcript.
+2. If the transcript is short or contains very few useful words, return FEWER words. It is perfectly fine to return only 1-5 words, or even an empty array if there is nothing useful. Do NOT pad the list with invented words.
+3. SKIP words the student already knows (provided in the existing deck list below)
+4. SKIP very common words that any ${(userLevel || 'b1').toUpperCase()} student would already know (der, die, das, ist, hat, und, aber, nicht, auch, ich, du, er, sie, es, wir, ihr, ein, eine, mit, von, zu, in, auf, an, für, dass, den, dem, des, werden, haben, sein, was, wie, wo, wer, wenn, etc.)
+5. SKIP English words, proper nouns, filler words, interjections (ja, nein, okay, also, na, hmm)
+6. For nouns: ALWAYS include the article (der/die/das)
+7. For reflexive verbs: include "sich"
+8. Rank by usefulness for daily life (most useful first)
+9. Maximum 20 words, but ONLY if that many useful words actually exist in the transcript
 
 GRAMMAR FORMATTING (details field):
 - For NOUNS: "Noun • gender • plural: Xen" — GERMAN grammar only, no English
@@ -546,10 +547,11 @@ GRAMMAR FORMATTING (details field):
 
 TRANSLATION RULES:
 - Primary meaning first, secondary after semicolon if relevant
-- Max 2-3 meanings, only frequently used ones`;
+- Max 2-3 meanings, only frequently used ones
+- Provide 2 natural example sentences per word, each showing a different usage`;
 
   const existingList = existingWords.slice(0, 500);
-  const userQuery = `TRANSCRIPT:\n${transcript.substring(0, 30000)}\n\nSTUDENT'S EXISTING DECK (skip these words):\n${JSON.stringify(existingList)}\n\nExtract the most useful vocabulary for a ${(userLevel || 'b1').toUpperCase()} learner.`;
+  const userQuery = `TRANSCRIPT:\n${transcript.substring(0, 30000)}\n\nSTUDENT'S EXISTING DECK (skip these words):\n${JSON.stringify(existingList)}\n\nExtract ONLY words that literally appear in the transcript above. If the transcript is short and has few useful words, return fewer words. Do NOT make up words. Return an empty array [] if nothing useful is found.`;
 
   const responseSchema = {
     type: "ARRAY",
