@@ -10,7 +10,9 @@
  * If we called the API directly from the browser, anyone could steal the key.
  *
  * Endpoints:
- *   POST /translate  — translates a German word (rate limited: 40/day per IP)
+ *   POST /translate          — translates a German word (rate limited: 40/day per IP)
+ *   POST /translate-batch    — translates multiple words in one call
+ *   POST /process-meeting    — uploads meeting audio, transcribes, extracts vocabulary
  *
  * Environment variables (in .env file):
  *   GEMINI_API_KEY   — your Google Gemini API key
@@ -24,6 +26,10 @@ const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');    // node-fetch v2 (v3 doesn't support require())
 const rateLimit = require('express-rate-limit');
+const multer = require('multer');       // File upload handling for meeting audio
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -39,6 +45,13 @@ app.use(cors());
 
 // Parse JSON request bodies (the frontend sends { germanWord: "..." })
 app.use(express.json());
+
+// Multer: saves uploaded meeting audio to OS temp directory (not memory).
+// This avoids loading large audio files into RAM (Render has 512MB limit).
+const meetingUpload = multer({
+  dest: os.tmpdir(),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB max
+});
 
 
 // ==========================================================================
@@ -372,8 +385,318 @@ Return a JSON array with one object per word.`;
 
 
 // ==========================================================================
+// MEETING AUDIO PROCESSING — Helper Functions
+// ==========================================================================
+
+/**
+ * Upload an audio file to the Gemini File API using resumable upload.
+ * Returns the file URI that can be passed to generateContent.
+ * Waits for the file to reach ACTIVE state before returning.
+ */
+async function uploadToGeminiFileAPI(filePath, mimeType) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const fileBuffer = fs.readFileSync(filePath);
+
+  // Step 1: Start resumable upload
+  const startRes = await fetch(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: {
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(fileBuffer.length),
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file: { displayName: 'meeting-audio' } }),
+    }
+  );
+
+  if (!startRes.ok) {
+    const errText = await startRes.text();
+    throw new Error(`Gemini File API start failed: ${startRes.status} ${errText}`);
+  }
+
+  const uploadUrl = startRes.headers.get('x-goog-upload-url');
+  if (!uploadUrl) throw new Error('No upload URL returned from Gemini File API');
+
+  // Step 2: Upload the bytes
+  const uploadRes = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      'X-Goog-Upload-Command': 'upload, finalize',
+      'X-Goog-Upload-Offset': '0',
+      'Content-Type': mimeType,
+    },
+    body: fileBuffer,
+  });
+
+  if (!uploadRes.ok) {
+    const errText = await uploadRes.text();
+    throw new Error(`Gemini File API upload failed: ${uploadRes.status} ${errText}`);
+  }
+
+  const fileInfo = await uploadRes.json();
+  let fileUri = fileInfo.file.uri;
+  const fileName = fileInfo.file.name;
+  let state = fileInfo.file.state;
+
+  // Step 3: Wait for file to become ACTIVE (may take a few seconds for large files)
+  let attempts = 0;
+  while (state === 'PROCESSING' && attempts < 60) {
+    await new Promise(r => setTimeout(r, 3000));
+    const checkRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
+    );
+    const checkData = await checkRes.json();
+    state = checkData.state;
+    fileUri = checkData.uri;
+    attempts++;
+  }
+
+  if (state !== 'ACTIVE') throw new Error(`File processing failed, state: ${state}`);
+  return { fileUri, fileName };
+}
+
+/**
+ * Delete a file from the Gemini File API (cleanup after processing).
+ */
+async function deleteGeminiFile(fileName) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`,
+    { method: 'DELETE' }
+  );
+}
+
+/**
+ * Transcribe audio using Gemini 2.5 Flash (supports audio input natively).
+ * Returns the German transcript as a string.
+ */
+async function transcribeAudio(fileUri, mimeType) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const modelName = 'gemini-2.5-flash';
+
+  const payload = {
+    contents: [{
+      parts: [
+        { fileData: { mimeType: mimeType, fileUri: fileUri } },
+        { text: 'Transcribe this German audio. Output ONLY the German transcript text, nothing else. Preserve the original German words exactly as spoken. Do not translate to English. Do not add timestamps or speaker labels.' }
+      ]
+    }],
+    generationConfig: {
+      temperature: 0.1,
+    },
+  };
+
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Transcription failed: ${response.status} ${errText}`);
+  }
+
+  const result = await response.json();
+  const transcript = result.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!transcript) throw new Error('Empty transcription result');
+  return transcript;
+}
+
+/**
+ * Extract vocabulary from a transcript using Gemini.
+ * Filters by user's CEFR level and excludes words already in their deck.
+ * Returns formatted word objects matching the /translate response format.
+ */
+async function extractVocabulary(transcript, userLevel, existingWords) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const modelName = 'gemini-2.5-flash-lite';
+
+  const levelDescriptions = {
+    a1: 'A1 (Beginner) — knows basic greetings, numbers, simple everyday words',
+    a2: 'A2 (Elementary) — knows everyday expressions, basic personal/family vocab',
+    b1: 'B1 (Intermediate) — knows common words about work, school, leisure',
+    b2: 'B2 (Upper-Intermediate) — understands main ideas of complex text',
+  };
+
+  const systemPrompt = `You are a German language teacher helping a ${levelDescriptions[userLevel] || levelDescriptions.b1} student extract useful vocabulary from a meeting transcript.
+
+TASK: Identify 15-20 German words/phrases from the transcript that would be most valuable for this student to learn.
+
+RULES:
+1. SKIP words the student already knows (provided in the existing deck list below)
+2. SKIP very common words that any ${(userLevel || 'b1').toUpperCase()} student would already know (der, die, das, ist, hat, und, aber, nicht, auch, ich, du, er, sie, es, wir, ihr, ein, eine, mit, von, zu, in, auf, an, etc.)
+3. SKIP English words, proper nouns, filler words
+4. FOCUS on vocabulary that appeared in a meaningful context in the meeting
+5. For nouns: ALWAYS include the article (der/die/das)
+6. For reflexive verbs: include "sich"
+7. Rank words by usefulness for daily life (most useful first)
+8. Provide 2 natural example sentences per word, each showing a different usage
+
+GRAMMAR FORMATTING (details field):
+- For NOUNS: "Noun • gender • plural: Xen" — GERMAN grammar only, no English
+- For VERBS: "Verb • past: ging, gegangen" — ONLY German verb forms
+- For ADJECTIVES: "Adjective • comparative: schöner" — ONLY German forms
+- Keep under 60 characters, use bullet (•) separators
+
+TRANSLATION RULES:
+- Primary meaning first, secondary after semicolon if relevant
+- Max 2-3 meanings, only frequently used ones`;
+
+  const existingList = existingWords.slice(0, 500);
+  const userQuery = `TRANSCRIPT:\n${transcript.substring(0, 30000)}\n\nSTUDENT'S EXISTING DECK (skip these words):\n${JSON.stringify(existingList)}\n\nExtract the most useful vocabulary for a ${(userLevel || 'b1').toUpperCase()} learner.`;
+
+  const responseSchema = {
+    type: "ARRAY",
+    items: {
+      type: "OBJECT",
+      properties: {
+        germanWord: { type: "STRING", description: "German word with article for nouns or sich for reflexive verbs" },
+        englishTranslation: { type: "STRING", description: "English translation, primary meaning first" },
+        details: { type: "STRING", description: "German grammar details only, under 60 chars" },
+        examples: {
+          type: "ARRAY",
+          items: {
+            type: "OBJECT",
+            properties: {
+              german: { type: "STRING" },
+              english: { type: "STRING" }
+            },
+            required: ["german", "english"]
+          }
+        }
+      },
+      required: ["germanWord", "englishTranslation", "details", "examples"]
+    }
+  };
+
+  const payload = {
+    contents: [{ parts: [{ text: userQuery }] }],
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: responseSchema,
+    },
+  };
+
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Vocabulary extraction failed: ${response.status} ${errText}`);
+  }
+
+  const result = await response.json();
+  const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!jsonText) throw new Error('Empty extraction result');
+
+  const parsedArray = JSON.parse(jsonText);
+
+  // Format identically to /translate and /translate-batch responses
+  return parsedArray.map(item => ({
+    german: `${item.germanWord}\n\n(${item.details})`,
+    english: item.englishTranslation,
+    examples: item.examples || [],
+  }));
+}
+
+
+// ==========================================================================
+// ROUTE: POST /process-meeting
+// ==========================================================================
+// Processes a meeting audio recording:
+// 1. Receives audio file + user level + existing deck words
+// 2. Uploads audio to Gemini File API
+// 3. Transcribes audio using Gemini 2.5 Flash
+// 4. Extracts vocabulary using Gemini 2.5 Flash Lite
+// 5. Returns formatted word list ready for flashcard creation
+
+app.post('/process-meeting', meetingUpload.single('audio'), async (req, res) => {
+  let tempFilePath = req.file?.path;
+  let geminiFileName = null;
+
+  try {
+    // --- Validate input ---
+    if (!req.file) {
+      return res.status(400).json({ error: 'Audio file is required' });
+    }
+
+    const userLevel = req.body.userLevel || 'b1';
+    let existingWords = [];
+    try {
+      existingWords = JSON.parse(req.body.existingWords || '[]');
+    } catch { existingWords = []; }
+
+    const mimeType = req.file.mimetype || 'audio/webm';
+    console.log(`Processing meeting: ${(req.file.size / 1024 / 1024).toFixed(1)}MB, level=${userLevel}, deck=${existingWords.length} words`);
+
+    // --- Step 1: Upload audio to Gemini File API ---
+    console.log('Uploading audio to Gemini File API...');
+    const { fileUri, fileName } = await uploadToGeminiFileAPI(tempFilePath, mimeType);
+    geminiFileName = fileName;
+
+    // Delete local temp file immediately after upload
+    try { fs.unlinkSync(tempFilePath); } catch {}
+    tempFilePath = null;
+
+    // --- Step 2: Transcribe audio ---
+    console.log('Transcribing audio...');
+    const transcript = await transcribeAudio(fileUri, mimeType);
+    console.log(`Transcript: ${transcript.length} chars`);
+
+    // --- Step 3: Extract vocabulary ---
+    console.log('Extracting vocabulary...');
+    const words = await extractVocabulary(transcript, userLevel, existingWords);
+    console.log(`Extracted ${words.length} words`);
+
+    // --- Step 4: Cleanup Gemini file ---
+    try { await deleteGeminiFile(geminiFileName); } catch {}
+
+    return res.json({
+      words: words,
+      wordCount: words.length,
+      transcriptPreview: transcript.substring(0, 200),
+    });
+
+  } catch (error) {
+    console.error('Meeting processing error:', error);
+
+    // Cleanup on error
+    if (tempFilePath) try { fs.unlinkSync(tempFilePath); } catch {}
+    if (geminiFileName) try { deleteGeminiFile(geminiFileName); } catch {}
+
+    return res.status(500).json({
+      error: 'Meeting processing failed',
+      details: error.message || 'Unknown error',
+    });
+  }
+});
+
+
+// ==========================================================================
 // START SERVER
 // ==========================================================================
-app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Backend server running on http://localhost:${PORT}`);
+  });
+}
+
+// Export for testing
+module.exports = {
+  app,
+  uploadToGeminiFileAPI,
+  transcribeAudio,
+  extractVocabulary,
+  deleteGeminiFile,
+};
